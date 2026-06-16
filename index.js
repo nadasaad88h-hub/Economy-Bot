@@ -311,7 +311,5 @@ app.listen(PORT, () => {
             .catch((err) => console.error('⚠️ Keep-alive heartbeat connection dropped:', err.message));
     }, 5 * 60 * 1000); 
 });
- 
-});
 
 client.login(process.env.TOKEN);

@@ -8,6 +8,8 @@ const {
 } = require('discord.js');
 const express = require('express');
 const fs = require('fs');
+const axios = require('axios'); // 👈 Add this line right here
+
 
 const client = new Client({ 
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers] 
@@ -293,6 +295,23 @@ client.on('interactionCreate', async (interaction) => {
             ephemeral: true
         });
     }
+});
+// ────────────────────────────────────────────────────────
+// 🌐 RENDER KEEP-ALIVE SERVER INFRASTRUCTURE
+// ────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🌐 Express web listener bonded to internal port: ${PORT}`);
+    
+    // Self-ping execution interval (Fires every 5 minutes)
+    setInterval(() => {
+        // Automatically picks up your Render URL, falls back to localhost for testing
+        const PROJECT_URL = `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost:' + PORT}`;
+        
+        axios.get(PROJECT_URL)
+            .then(() => console.log('💓 Keep-alive pulse transmitted successfully.'))
+            .catch((err) => console.error('⚠️ Keep-alive heartbeat connection dropped:', err.message));
+    }, 5 * 60 * 1000); 
 });
 
 client.login(process.env.TOKEN);

@@ -136,31 +136,47 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
-    // ─────────────── COMMAND A: ECONOMY LEADERBOARD ───────────────
+        // ─────────────── COMMAND A: ECONOMY LEADERBOARD ───────────────
     if (commandName === 'economy_leaderboard') {
+        // Filter out users who have 0 wallet points, then sort highest to lowest
         const sortedPlayers = Object.entries(db)
             .map(([id, data]) => ({ id, wallet: data.wallet || 0 }))
+            .filter(player => player.wallet > 0)
             .sort((a, b) => b.wallet - a.wallet);
 
-        const serverTotal = interaction.guild ? interaction.guild.memberCount : 10;
-        const displayLimit = Math.min(serverTotal, 10);
+        // Only show up to the top 10 active players
+        const displayLimit = Math.min(sortedPlayers.length, 10);
         let leaderboardText = '';
         
         for (let i = 0; i < displayLimit; i++) {
-            if (sortedPlayers[i]) {
-                leaderboardText += `${i + 1}. <@${sortedPlayers[i].id}>\n`;
-            } else {
-                leaderboardText += `${i + 1}.\n`;
-            }
+            const player = sortedPlayers[i];
+            // Try to find the user in the server cache to get their raw name instead of a ping
+            const member = interaction.guild?.members.cache.get(player.id);
+            const username = member ? member.user.username : `User (${player.id})`;
+            
+            leaderboardText += `**${i + 1}.** ${username} ─ \`${player.wallet} pts\`\n`;
         }
 
-        leaderboardText += `\nYou: ${userData.wallet}\nWithdrew Points: ${userData.withdrawn}`;
+        if (displayLimit === 0) {
+            leaderboardText = '*The leaderboard is currently empty. No active players with points!*';
+        }
+
+        // Build the non-pinging embed response
+        const leaderboardEmbed = new EmbedBuilder()
+            .setColor('#1E90FF')
+            .setTitle('🏆 Points Leaderboard')
+            .setDescription(leaderboardText)
+            .addFields(
+                { name: '👤 Your Statistics', value: `Active Wallet: \`${userData.wallet} pts\`\nWithdrawn Quota: \`${userData.withdrawn} pts\`` }
+            )
+            .setTimestamp();
 
         return interaction.reply({
-            content: leaderboardText,
+            embeds: [leaderboardEmbed],
             ephemeral: true 
         });
     }
+
 
     // ─────────────── COMMAND B: WITHDRAW POINTS ───────────────
     if (commandName === 'withdraw_points') {

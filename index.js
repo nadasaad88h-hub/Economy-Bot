@@ -14,11 +14,11 @@ const client = new Client({
 });
 
 const app = express();
-app.use(express.json()); // Allows the API to read JSON requests
+app.use(express.json());
 
 app.get('/', (req, res) => res.send('Economy System Core Active.'));
 
-// 🔒 SECURE BOT-TO-BOT PASSWORD (Change this to any random string you want)
+// 🔒 SECURE BOT-TO-BOT PASSWORD
 const AUTH_SECRET = process.env.BOT_SECRET || 'SuperSecretToken123!';
 
 // ⚙️ CONFIGURATION SYSTEM
@@ -118,7 +118,18 @@ client.once('ready', async () => {
             new SlashCommandBuilder()
                 .setName('collect_points')
                 .setDescription('Retrieve points back from your withdrawn quota into your active wallet.')
-                .addIntegerOption(opt => opt.setName('amount').setDescription('Amount of points to collect back').setRequired(true).setMinValue(1))
+                .addIntegerOption(opt => opt.setName('amount').setDescription('Amount of points to collect back').setRequired(true).setMinValue(1)),
+
+            new SlashCommandBuilder()
+                .setName('gamble')
+                .setDescription('Risk your wallet points on a color draw!')
+                .addIntegerOption(opt => opt.setName('points').setDescription('The amount of points you want to bet.').setRequired(true).setMinValue(1))
+                .addStringOption(opt => opt.setName('color').setDescription('Pick your color destination').setRequired(true)
+                    .addChoices(
+                        { name: 'Red 🔴', value: 'red' },
+                        { name: 'Green 🟢', value: 'green' },
+                        { name: 'Yellow 🟡', value: 'yellow' }
+                    ))
         ].map(cmd => cmd.toJSON());
 
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -142,14 +153,16 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     const { commandName, user } = interaction;
-    const db = loadDB();
-    const userData = getUserData(db, user.id);
     const now = Date.now();
     const halfHourMs = 30 * 60 * 1000;
 
+    // Fresh atomic lookup for accurate cooldown checks
+    let initialDb = loadDB();
+    let initialUser = getUserData(initialDb, user.id);
+
     const exemptCommands = ['economy_leaderboard', 'withdraw_points', 'collect_points'];
     if (!exemptCommands.includes(commandName)) {
-        const lastUsed = userData.cooldowns[commandName] || 0;
+        const lastUsed = initialUser.cooldowns[commandName] || 0;
         if (now - lastUsed < halfHourMs) {
             const expirationTimeUnix = Math.floor((lastUsed + halfHourMs) / 1000);
             return interaction.reply({
@@ -159,8 +172,84 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
+    // 🎰 GAMBLE COMMAND LOGIC LAYER
+    if (commandName === 'gamble') {
+        if (initialUser.wallet <= 0) {
+            return interaction.reply({ content: '❌ You don’t have any points in your wallet to gamble with!', ephemeral: true });
+        }
+
+        let betAmount = interaction.options.getInteger('points');
+        const chosenColorKey = interaction.options.getString('color');
+
+        if (betAmount > initialUser.wallet) {
+            betAmount = initialUser.wallet;
+        }
+
+        const colorMap = {
+            'red': { emoji: '🔴', display: 'red', hex: '#FF0000' },
+            'green': { emoji: '🟢', display: 'green', hex: '#00FF00' },
+            'yellow': { emoji: '🟡', display: 'yellow', hex: '#FFFF00' }
+        };
+
+        const playerColor = colorMap[chosenColorKey];
+        const oldPointsSnapshot = initialUser.wallet;
+
+        // Apply and save cooldown instantly to prevent rapid click spamming
+        initialUser.cooldowns[commandName] = now;
+        saveDB(initialDb); 
+
+        const displayName = user.username.toLowerCase() === 'unbreakilo' ? 'Unbreakilo' : user.username;
+        const introEmbed = new EmbedBuilder()
+            .setColor('#5865F2')
+            .setTitle(`${playerColor.emoji} ${displayName} chose to gamble ${betAmount} on ${playerColor.display}!`)
+            .setDescription('🏆 Gambling….');
+
+        await interaction.reply({ embeds: [introEmbed] });
+
+        const colorKeys = ['red', 'green', 'yellow'];
+        const drawnColorKey = colorKeys[Math.floor(Math.random() * colorKeys.length)];
+        const drawnColor = colorMap[drawnColorKey];
+
+        setTimeout(async () => {
+            const runtimeDb = loadDB();
+            const runtimeUserData = getUserData(runtimeDb, user.id);
+
+            const outcomeEmbed = new EmbedBuilder();
+            let dynamicNewPoints = runtimeUserData.wallet;
+
+            if (chosenColorKey === drawnColorKey) {
+                runtimeUserData.wallet += betAmount; 
+                dynamicNewPoints = runtimeUserData.wallet;
+
+                outcomeEmbed
+                    .setColor(playerColor.hex)
+                    .setTitle(`${playerColor.emoji} Congratulations ${displayName}, landed on ${playerColor.display}!`)
+                    .setDescription(`Your gambled points will be multiplied by 2.\n\nOld points: ${oldPointsSnapshot}\nNew points: ${dynamicNewPoints}`);
+            } else {
+                runtimeUserData.wallet = Math.floor(runtimeUserData.wallet / 2);
+                dynamicNewPoints = runtimeUserData.wallet;
+
+                outcomeEmbed
+                    .setColor(drawnColor.hex)
+                    .setTitle(`${drawnColor.emoji} Oof, it landed on ${drawnColor.display}. Better luck next time!`)
+                    .setDescription(`Old points: ${oldPointsSnapshot}\nNew points: ${dynamicNewPoints}`);
+            }
+
+            saveDB(runtimeDb);
+            await interaction.followUp({ content: `<@${user.id}>`, embeds: [outcomeEmbed] });
+        }, 2500);
+
+        return;
+    }
+
     if (commandName === 'economy_leaderboard') {
-        const sortedPlayers = Object.entries(db)
+        // Acknowledge interaction instantly to give breathing room for lookups
+        await interaction.deferReply({ ephemeral: true });
+        
+        const activeDb = loadDB();
+        const personalData = getUserData(activeDb, user.id);
+        
+        const sortedPlayers = Object.entries(activeDb)
             .map(([id, data]) => ({ id, wallet: data.wallet || 0 }))
             .filter(player => player.wallet > 0)
             .sort((a, b) => b.wallet - a.wallet);
@@ -170,8 +259,12 @@ client.on('interactionCreate', async (interaction) => {
         
         for (let i = 0; i < displayLimit; i++) {
             const player = sortedPlayers[i];
-            const member = interaction.guild?.members.cache.get(player.id);
-            const username = member ? member.user.username : `User (${player.id})`;
+            let username = `User (${player.id})`;
+            
+            try {
+                const fetchedMember = interaction.guild?.members.cache.get(player.id) || await interaction.guild?.members.fetch(player.id).catch(() => null);
+                if (fetchedMember) username = fetchedMember.user.username;
+            } catch {}
             
             leaderboardText += `**${i + 1}.** ${username} ─ \`${player.wallet} pts\`\n`;
         }
@@ -185,28 +278,33 @@ client.on('interactionCreate', async (interaction) => {
             .setTitle('🏆 Points Leaderboard')
             .setDescription(leaderboardText)
             .addFields(
-                { name: '👤 Your Statistics', value: `Active Wallet: \`${userData.wallet} pts\`\nWithdrawn Quota: \`${userData.withdrawn} pts\`` }
+                { name: '👤 Your Statistics', value: `Active Wallet: \`${personalData.wallet} pts\`\nWithdrawn Quota: \`${personalData.withdrawn} pts\`` }
             )
             .setTimestamp();
 
-        return interaction.reply({ embeds: [leaderboardEmbed], ephemeral: true });
+        return interaction.editReply({ embeds: [leaderboardEmbed] });
     }
 
     if (commandName === 'withdraw_points') {
+        const actionDb = loadDB();
+        const actionUser = getUserData(actionDb, user.id);
         const amount = interaction.options.getInteger('amount');
 
-        if (userData.wallet < amount) {
+        if (actionUser.wallet < amount) {
             return interaction.reply({ content: `❌ You don't have ${amount} points in your active wallet to transfer.`, ephemeral: true });
         }
 
-        userData.wallet -= amount;
-        userData.withdrawn += amount;
-        saveDB(db);
+        actionUser.wallet -= amount;
+        actionUser.withdrawn += amount;
+        saveDB(actionDb);
 
         return interaction.reply({ content: `Withdrew Points: ${amount}`, ephemeral: true });
     }
 
     if (commandName === 'steal_points') {
+        const actionDb = loadDB();
+        const actionUser = getUserData(actionDb, user.id);
+        
         const targetUser = interaction.options.getUser('target');
         const requestedAmount = interaction.options.getInteger('amount');
 
@@ -214,54 +312,60 @@ client.on('interactionCreate', async (interaction) => {
             return interaction.reply({ content: '❌ You can’t mug yourself!', ephemeral: true });
         }
 
-        const targetData = getUserData(db, targetUser.id);
+        const targetData = getUserData(actionDb, targetUser.id);
 
         if (targetData.wallet <= 0) {
             return interaction.reply({ content: '❌ This user has no points in their active wallet to take!', ephemeral: true });
         }
 
-        userData.cooldowns[commandName] = now;
+        actionUser.cooldowns[commandName] = now;
         const isSuccess = Math.random() < 0.5; 
         
         if (isSuccess) {
             const actualStealAmount = Math.min(targetData.wallet, requestedAmount);
 
             targetData.wallet -= actualStealAmount;
-            userData.wallet += actualStealAmount;
-            saveDB(db);
+            actionUser.wallet += actualStealAmount;
+            saveDB(actionDb);
 
             const alertEmbed = new EmbedBuilder()
                 .setColor('#00FF00')
-                .setDescription(`🚨${user.username} has stole ${actualStealAmount} Points from <@${targetUser.id}>!`);
+                .setDescription(`🚨 **${user.username}** stole \`${actualStealAmount}\` Points from <@${targetUser.id}>!`);
 
             return interaction.reply({ embeds: [alertEmbed] });
         } else {
-            const penaltyAmount = Math.min(userData.wallet, requestedAmount);
+            const penaltyAmount = Math.min(actionUser.wallet, requestedAmount);
 
-            userData.wallet -= penaltyAmount;
+            actionUser.wallet -= penaltyAmount;
             targetData.wallet += penaltyAmount;
-            saveDB(db);
+            saveDB(actionDb);
 
             const failEmbed = new EmbedBuilder()
                 .setColor('#FF0000')
-                .setDescription(`🚨${user.username} has attempted to **steal ${requestedAmount}** Points from <@${targetUser.id}> and got **caught!** Oof, better luck next time!\n***Points lost: ${penaltyAmount}***`);
+                .setDescription(`🚨 **${user.username}** attempted to steal \`${requestedAmount}\` Points from <@${targetUser.id}> and got **caught!** Oof, better luck next time!\n***Points lost: ${penaltyAmount}***`);
 
             return interaction.reply({ embeds: [failEmbed] });
         }
     }
 
     if (commandName === 'earn_points') {
-        userData.wallet += 2;
-        userData.cooldowns[commandName] = now;
-        saveDB(db);
+        const actionDb = loadDB();
+        const actionUser = getUserData(actionDb, user.id);
+
+        actionUser.wallet += 2;
+        actionUser.cooldowns[commandName] = now;
+        saveDB(actionDb);
 
         return interaction.reply({ content: `🌙 You had a night shift and earned 2 points, well done!`, ephemeral: true });
     }
 
     if (commandName === 'daily_points') {
+        const actionDb = loadDB();
+        const actionUser = getUserData(actionDb, user.id);
+
         const oneDayMs = 24 * 60 * 60 * 1000;
         const twoDaysMs = 48 * 60 * 60 * 1000;
-        const lastDaily = userData.lastDailyTimestamp || 0;
+        const lastDaily = actionUser.lastDailyTimestamp || 0;
 
         if (lastDaily !== 0 && now - lastDaily < oneDayMs) {
             const nextAvailableUnix = Math.floor((lastDaily + oneDayMs) / 1000);
@@ -271,36 +375,38 @@ client.on('interactionCreate', async (interaction) => {
         let activeReward = 3;
 
         if (lastDaily === 0) {
-            userData.dailyStreak = 1;
+            actionUser.dailyStreak = 1;
             activeReward = 3;
         } else if (now - lastDaily <= twoDaysMs) {
-            userData.dailyStreak += 1;
-            activeReward = Math.min(3 + (userData.dailyStreak - 1), 10);
+            actionUser.dailyStreak += 1;
+            activeReward = Math.min(3 + (actionUser.dailyStreak - 1), 10);
         } else {
-            userData.dailyStreak = 1;
+            actionUser.dailyStreak = 1;
             activeReward = 3;
         }
 
-        userData.lastDailyTimestamp = now;
-        userData.wallet += activeReward;
-        userData.cooldowns[commandName] = now;
-        saveDB(db);
+        actionUser.lastDailyTimestamp = now;
+        actionUser.wallet += activeReward;
+        actionUser.cooldowns[commandName] = now;
+        saveDB(actionDb);
 
         return interaction.reply({ content: `📆 Daily reward claimed! You received \`${activeReward}\` Points!`, ephemeral: true });
     }
 
     if (commandName === 'collect_points') {
+        const actionDb = loadDB();
+        const actionUser = getUserData(actionDb, user.id);
         const inputAmount = interaction.options.getInteger('amount');
 
-        if (userData.withdrawn <= 0) {
+        if (actionUser.withdrawn <= 0) {
             return interaction.reply({ content: '❌ You have no points inside your withdrawn database allocation to retrieve.', ephemeral: true });
         }
 
-        const actualWithdrawBack = Math.min(userData.withdrawn, inputAmount);
+        const actualWithdrawBack = Math.min(actionUser.withdrawn, inputAmount);
 
-        userData.withdrawn -= actualWithdrawBack;
-        userData.wallet += actualWithdrawBack;
-        saveDB(db);
+        actionUser.withdrawn -= actualWithdrawBack;
+        actionUser.wallet += actualWithdrawBack;
+        saveDB(actionDb);
 
         return interaction.reply({ content: `📥 Retracted \`${actualWithdrawBack}\` Points back out into your active wallet.`, ephemeral: true });
     }

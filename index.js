@@ -9,13 +9,17 @@ const {
 const express = require('express');
 const fs = require('fs');
 
-
 const client = new Client({ 
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers] 
 });
 
 const app = express();
+app.use(express.json()); // Allows the API to read JSON requests
+
 app.get('/', (req, res) => res.send('Economy System Core Active.'));
+
+// 🔒 SECURE BOT-TO-BOT PASSWORD (Change this to any random string you want)
+const AUTH_SECRET = process.env.BOT_SECRET || 'SuperSecretToken123!';
 
 // ⚙️ CONFIGURATION SYSTEM
 const TARGET_CHANNEL_ID = '1506139329536327760'; // Only allowed channel
@@ -57,6 +61,27 @@ function getUserData(db, userId) {
     }
     return db[userId];
 }
+
+// 🌐 PRIVATE SYNC API ENDPOINT FOR GEOGUESSR/LOCATION BOT
+app.post('/api/add-points', (req, res) => {
+    const { secret, userId, points } = req.body;
+
+    if (!secret || secret !== AUTH_SECRET) {
+        return res.status(403).json({ error: 'Unauthorized communication attempt.' });
+    }
+
+    if (!userId || !points) {
+        return res.status(400).json({ error: 'Missing parameters.' });
+    }
+
+    const db = loadDB();
+    const userData = getUserData(db, userId);
+    userData.wallet += Number(points);
+    saveDB(db);
+
+    console.log(`📡 API Sync: Added ${points} points to user ${userId} via external system confirmation.`);
+    return res.json({ success: true, newBalance: userData.wallet });
+});
 
 // ────────────────────────────────────────────────────────
 // SLASH COMMAND REGISTER APPLICATION LAYER
@@ -109,7 +134,6 @@ client.once('ready', async () => {
 client.on('interactionCreate', async (interaction) => {
     if (!interaction.isChatInputCommand()) return;
 
-    // 🔒 Channel Lock Validation Gate
     if (interaction.channelId !== TARGET_CHANNEL_ID) {
         return interaction.reply({ 
             content: `❌ This command can only be executed in <#${TARGET_CHANNEL_ID}>.`, 
@@ -123,7 +147,6 @@ client.on('interactionCreate', async (interaction) => {
     const now = Date.now();
     const halfHourMs = 30 * 60 * 1000;
 
-    // ⏱️ Global 30-Min Cooldown Enforcement Gate (Exempting non-spam commands)
     const exemptCommands = ['economy_leaderboard', 'withdraw_points', 'collect_points'];
     if (!exemptCommands.includes(commandName)) {
         const lastUsed = userData.cooldowns[commandName] || 0;
@@ -136,21 +159,17 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
-        // ─────────────── COMMAND A: ECONOMY LEADERBOARD ───────────────
     if (commandName === 'economy_leaderboard') {
-        // Filter out users who have 0 wallet points, then sort highest to lowest
         const sortedPlayers = Object.entries(db)
             .map(([id, data]) => ({ id, wallet: data.wallet || 0 }))
             .filter(player => player.wallet > 0)
             .sort((a, b) => b.wallet - a.wallet);
 
-        // Only show up to the top 10 active players
         const displayLimit = Math.min(sortedPlayers.length, 10);
         let leaderboardText = '';
         
         for (let i = 0; i < displayLimit; i++) {
             const player = sortedPlayers[i];
-            // Try to find the user in the server cache to get their raw name instead of a ping
             const member = interaction.guild?.members.cache.get(player.id);
             const username = member ? member.user.username : `User (${player.id})`;
             
@@ -161,7 +180,6 @@ client.on('interactionCreate', async (interaction) => {
             leaderboardText = '*The leaderboard is currently empty. No active players with points!*';
         }
 
-        // Build the non-pinging embed response
         const leaderboardEmbed = new EmbedBuilder()
             .setColor('#1E90FF')
             .setTitle('🏆 Points Leaderboard')
@@ -171,14 +189,9 @@ client.on('interactionCreate', async (interaction) => {
             )
             .setTimestamp();
 
-        return interaction.reply({
-            embeds: [leaderboardEmbed],
-            ephemeral: true 
-        });
+        return interaction.reply({ embeds: [leaderboardEmbed], ephemeral: true });
     }
 
-
-    // ─────────────── COMMAND B: WITHDRAW POINTS ───────────────
     if (commandName === 'withdraw_points') {
         const amount = interaction.options.getInteger('amount');
 
@@ -190,13 +203,9 @@ client.on('interactionCreate', async (interaction) => {
         userData.withdrawn += amount;
         saveDB(db);
 
-        return interaction.reply({
-            content: `Withdrew Points: ${amount}`,
-            ephemeral: true
-        });
+        return interaction.reply({ content: `Withdrew Points: ${amount}`, ephemeral: true });
     }
 
-    // ─────────────── COMMAND C: STEAL POINTS ───────────────
     if (commandName === 'steal_points') {
         const targetUser = interaction.options.getUser('target');
         const requestedAmount = interaction.options.getInteger('amount');
@@ -241,19 +250,14 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
-    // ─────────────── COMMAND D: EARN POINTS ───────────────
     if (commandName === 'earn_points') {
         userData.wallet += 2;
         userData.cooldowns[commandName] = now;
         saveDB(db);
 
-        return interaction.reply({
-            content: `🌙 You had a night shift and earned 2 points, well done!`,
-            ephemeral: true
-        });
+        return interaction.reply({ content: `🌙 You had a night shift and earned 2 points, well done!`, ephemeral: true });
     }
 
-    // ─────────────── COMMAND E: DAILY POINTS ───────────────
     if (commandName === 'daily_points') {
         const oneDayMs = 24 * 60 * 60 * 1000;
         const twoDaysMs = 48 * 60 * 60 * 1000;
@@ -261,10 +265,7 @@ client.on('interactionCreate', async (interaction) => {
 
         if (lastDaily !== 0 && now - lastDaily < oneDayMs) {
             const nextAvailableUnix = Math.floor((lastDaily + oneDayMs) / 1000);
-            return interaction.reply({
-                content: `⚠️ Your next daily reward is ready <t:${nextAvailableUnix}:R>.`,
-                ephemeral: true
-            });
+            return interaction.reply({ content: `⚠️ Your next daily reward is ready <t:${nextAvailableUnix}:R>.`, ephemeral: true });
         }
 
         let activeReward = 3;
@@ -285,13 +286,9 @@ client.on('interactionCreate', async (interaction) => {
         userData.cooldowns[commandName] = now;
         saveDB(db);
 
-        return interaction.reply({
-            content: `📆 Daily reward claimed! You received \`${activeReward}\` Points!`,
-            ephemeral: true
-        });
+        return interaction.reply({ content: `📆 Daily reward claimed! You received \`${activeReward}\` Points!`, ephemeral: true });
     }
 
-    // ─────────────── COMMAND F: COLLECT POINTS ───────────────
     if (commandName === 'collect_points') {
         const inputAmount = interaction.options.getInteger('amount');
 
@@ -305,23 +302,16 @@ client.on('interactionCreate', async (interaction) => {
         userData.wallet += actualWithdrawBack;
         saveDB(db);
 
-        return interaction.reply({
-            content: `📥 Retracted \`${actualWithdrawBack}\` Points back out into your active wallet.`,
-            ephemeral: true
-        });
+        return interaction.reply({ content: `📥 Retracted \`${actualWithdrawBack}\` Points back out into your active wallet.`, ephemeral: true });
     }
 });
-// ────────────────────────────────────────────────────────
-// 🌐 RENDER KEEP-ALIVE SERVER INFRASTRUCTURE
-// ────────────────────────────────────────────────────────
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🌐 Express web listener bonded to internal port: ${PORT}`);
     
-    // Self-ping execution interval (Fires every 5 minutes)
     setInterval(() => {
         const PROJECT_URL = `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost:' + PORT}`;
-        
         fetch(PROJECT_URL)
             .then(() => console.log('💓 Keep-alive pulse transmitted successfully.'))
             .catch((err) => console.error('⚠️ Keep-alive heartbeat connection dropped:', err.message));

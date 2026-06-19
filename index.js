@@ -129,6 +129,15 @@ client.once('ready', async () => {
                         { name: 'Red 🔴', value: 'red' },
                         { name: 'Green 🟢', value: 'green' },
                         { name: 'Yellow 🟡', value: 'yellow' }
+                    )),
+
+            new SlashCommandBuilder()
+                .setName('point_flip')
+                .setDescription('Flip a coin to win 8 points!')
+                .addStringOption(opt => opt.setName('choice').setDescription('Pick Heads or Tails').setRequired(true)
+                    .addChoices(
+                        { name: 'Heads 🪙', value: 'heads' },
+                        { name: 'Tails 🪙', value: 'tails' }
                     ))
         ].map(cmd => cmd.toJSON());
 
@@ -155,12 +164,13 @@ client.on('interactionCreate', async (interaction) => {
     const { commandName, user } = interaction;
     const now = Date.now();
     const halfHourMs = 30 * 60 * 1000;
+    const tenMinutesMs = 10 * 60 * 1000;
 
-    // Fresh atomic lookup for accurate cooldown checks
     let initialDb = loadDB();
     let initialUser = getUserData(initialDb, user.id);
 
-    const exemptCommands = ['economy_leaderboard', 'withdraw_points', 'collect_points'];
+    // Global Cooldown Handler
+    const exemptCommands = ['economy_leaderboard', 'withdraw_points', 'collect_points', 'gamble', 'point_flip'];
     if (!exemptCommands.includes(commandName)) {
         const lastUsed = initialUser.cooldowns[commandName] || 0;
         if (now - lastUsed < halfHourMs) {
@@ -172,7 +182,63 @@ client.on('interactionCreate', async (interaction) => {
         }
     }
 
-    // 🎰 GAMBLE COMMAND LOGIC LAYER
+    // 🪙 POINT FLIP COMMAND LOGIC
+    if (commandName === 'point_flip') {
+        const lastFlipUsed = initialUser.cooldowns[commandName] || 0;
+        if (now - lastFlipUsed < tenMinutesMs) {
+            const expirationTimeUnix = Math.floor((lastFlipUsed + tenMinutesMs) / 1000);
+            return interaction.reply({
+                content: `⚠️ Cooldown active! Please wait <t:${expirationTimeUnix}:R> before flipping again.`,
+                ephemeral: true
+            });
+        }
+
+        const userChoice = interaction.options.getString('choice'); 
+        const displayChoice = userChoice.charAt(0).toUpperCase() + userChoice.slice(1);
+
+        initialUser.cooldowns[commandName] = now;
+        saveDB(initialDb);
+
+        const initialEmbed = new EmbedBuilder()
+            .setColor('#FEE75C')
+            .setTitle(`You chose ${displayChoice}!`)
+            .setDescription('🪙 Flipping…..');
+
+        await interaction.reply({ embeds: [initialEmbed] });
+
+        setTimeout(async () => {
+            const runtimeDb = loadDB();
+            const runtimeUser = getUserData(runtimeDb, user.id);
+            
+            const outcomes = ['heads', 'tails'];
+            const landedOn = outcomes[Math.floor(Math.random() * outcomes.length)];
+            const displayLanded = landedOn.charAt(0).toUpperCase() + landedOn.slice(1);
+            
+            const resultEmbed = new EmbedBuilder();
+            const oldPoints = runtimeUser.wallet;
+
+            if (userChoice === landedOn) {
+                runtimeUser.wallet += 8;
+                saveDB(runtimeDb);
+
+                resultEmbed
+                    .setColor('#57F287')
+                    .setTitle(`Congratulations ${user.username}, you won 8 Points!`)
+                    .setDescription(`It landed on **${displayLanded}** 🎉\n\n**Old points:** ${oldPoints}\n**New points:** ${runtimeUser.wallet}`);
+            } else {
+                resultEmbed
+                    .setColor('#ED4245')
+                    .setTitle(`🔴 Oof, it landed on **${displayLanded}**, better luck next time!`)
+                    .setDescription('No points were deducted, do not worry.');
+            }
+
+            await interaction.followUp({ content: `<@${user.id}>`, embeds: [resultEmbed] });
+        }, 4000);
+
+        return;
+    }
+
+    // 🎰 GAMBLE COMMAND LOGIC LAYER (NO COOLDOWN, CUSTOM BET SPLIT MATH)
     if (commandName === 'gamble') {
         if (initialUser.wallet <= 0) {
             return interaction.reply({ content: '❌ You don’t have any points in your wallet to gamble with!', ephemeral: true });
@@ -193,10 +259,12 @@ client.on('interactionCreate', async (interaction) => {
 
         const playerColor = colorMap[chosenColorKey];
         const oldPointsSnapshot = initialUser.wallet;
+        const lossAmount = Math.floor(betAmount / 2);
 
-        // Apply and save cooldown instantly to prevent rapid click spamming
-        initialUser.cooldowns[commandName] = now;
-        saveDB(initialDb); 
+        // Deduct potential maximum loss immediately to prevent race-condition balance spamming
+        initialUser.wallet -= lossAmount;
+        if (initialUser.wallet < 0) initialUser.wallet = 0;
+        saveDB(initialDb);
 
         const displayName = user.username.toLowerCase() === 'unbreakilo' ? 'Unbreakilo' : user.username;
         const introEmbed = new EmbedBuilder()
@@ -215,24 +283,25 @@ client.on('interactionCreate', async (interaction) => {
             const runtimeUserData = getUserData(runtimeDb, user.id);
 
             const outcomeEmbed = new EmbedBuilder();
-            let dynamicNewPoints = runtimeUserData.wallet;
+            let dynamicNewPoints;
 
             if (chosenColorKey === drawnColorKey) {
-                runtimeUserData.wallet += betAmount; 
+                // WIN: Refund the pre-deducted half-loss, then add the full win amount
+                runtimeUserData.wallet += (lossAmount + betAmount); 
                 dynamicNewPoints = runtimeUserData.wallet;
 
                 outcomeEmbed
                     .setColor(playerColor.hex)
                     .setTitle(`${playerColor.emoji} Congratulations ${displayName}, landed on ${playerColor.display}!`)
-                    .setDescription(`Your gambled points will be multiplied by 2.\n\nOld points: ${oldPointsSnapshot}\nNew points: ${dynamicNewPoints}`);
+                    .setDescription(`Your gambled points have been doubled! (+${betAmount} pts)\n\nOld points: ${oldPointsSnapshot}\nNew points: ${dynamicNewPoints}`);
             } else {
-                runtimeUserData.wallet = Math.floor(runtimeUserData.wallet / 2);
+                // LOSE: Points are already deducted from wallet, just render output
                 dynamicNewPoints = runtimeUserData.wallet;
 
                 outcomeEmbed
                     .setColor(drawnColor.hex)
                     .setTitle(`${drawnColor.emoji} Oof, it landed on ${drawnColor.display}. Better luck next time!`)
-                    .setDescription(`Old points: ${oldPointsSnapshot}\nNew points: ${dynamicNewPoints}`);
+                    .setDescription(`You lost half of your bet. (-${lossAmount} pts)\n\nOld points: ${oldPointsSnapshot}\nNew points: ${dynamicNewPoints}`);
             }
 
             saveDB(runtimeDb);
@@ -243,7 +312,6 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (commandName === 'economy_leaderboard') {
-        // Acknowledge interaction instantly to give breathing room for lookups
         await interaction.deferReply({ ephemeral: true });
         
         const activeDb = loadDB();
